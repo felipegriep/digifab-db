@@ -1,0 +1,202 @@
+USE DIGIFAB;
+
+-- =========================================================
+-- 05_queries_dashboard.sql
+-- Consultas prontas para KPIs e gráficos (MySQL 8)
+-- =========================================================
+
+-- -------------------------
+-- PARÂMETROS DE PERÍODO
+-- Ajuste como preferir:
+--   a) Últimos 7 dias:
+--      SET @DATA_INI = DATE_SUB(CURDATE(), INTERVAL 6 DAY);
+--      SET @DATA_FIM = CURDATE();
+--   b) Intervalo fixo:
+--      SET @DATA_INI = '2025-09-05';
+--      SET @DATA_FIM = '2025-09-10';
+-- -------------------------
+SET @DATA_INI = DATE_SUB(CURDATE(), INTERVAL 6 DAY);
+SET @DATA_FIM = CURDATE();
+
+-- =========================================================
+-- ================   CARDS (KPIs)   =======================
+-- =========================================================
+
+-- 1) Quantidade de OPs no período
+SELECT COUNT(*) AS QTD_OPS
+FROM ORDEM_PRODUCAO
+WHERE DT_HORA_INICIO >= @DATA_INI
+  AND DT_HORA_INICIO <  DATE_ADD(@DATA_FIM, INTERVAL 1 DAY);
+
+-- 2) Unidades planejadas no período
+SELECT COALESCE(SUM(QUANTIDADE_PRODUZIR),0) AS UNIDADES_PLANEJADAS
+FROM ORDEM_PRODUCAO
+WHERE DT_HORA_INICIO >= @DATA_INI
+  AND DT_HORA_INICIO <  DATE_ADD(@DATA_FIM, INTERVAL 1 DAY);
+
+-- 3) Matéria-prima consumida (kg) no período
+SELECT ROUND(COALESCE(SUM(CONSUMO_KG),0),3) AS MP_CONSUMIDA_KG
+FROM VW_CONSUMO_MP_POR_DIA
+WHERE DIA BETWEEN @DATA_INI AND @DATA_FIM;
+
+-- 4) Lotes de produto atendidos no período
+SELECT COUNT(DISTINCT ID_LOTE_PRODUTO) AS LOTES_PRODUTO_ATENDIDOS
+FROM VW_OP_BASICA
+WHERE DIA BETWEEN @DATA_INI AND @DATA_FIM;
+
+-- 5) Utilização média (ponderada) das linhas no período
+--    (soma programado / soma capacidade estimada)
+SELECT
+  ROUND(
+    COALESCE(SUM(PROGRAMADO_DIA),0) / NULLIF(COALESCE(SUM(CAPACIDADE_ESTIMADA),0),0)
+  , 2) AS UTILIZACAO_MEDIA_PONDERADA
+FROM VW_UTILIZACAO_LINHA_DIA
+WHERE DIA BETWEEN @DATA_INI AND @DATA_FIM;
+
+-- (opcional) Utilização média simples (média aritmética das razões por linha/dia)
+SELECT
+  ROUND(AVG(UTILIZACAO_REL), 2) AS UTILIZACAO_MEDIA_SIMPLES
+FROM VW_UTILIZACAO_LINHA_DIA
+WHERE DIA BETWEEN @DATA_INI AND @DATA_FIM;
+
+-- =========================================================
+-- ================   GRÁFICOS / SÉRIES   ==================
+-- =========================================================
+
+-- A) Produção por dia e por linha (série)
+SELECT *
+FROM VW_PRODUCAO_POR_DIA_LINHA
+WHERE DIA BETWEEN @DATA_INI AND @DATA_FIM
+ORDER BY DIA, CODIGO_LINHA;
+
+-- B) Produção por produto (Top 5 do período)
+SELECT
+  B.CODIGO_PRODUTO,
+  B.NOME_PRODUTO,
+  SUM(B.QUANTIDADE_PRODUZIR) AS TOTAL_PLANEJADO
+FROM VW_OP_BASICA B
+WHERE B.DIA BETWEEN @DATA_INI AND @DATA_FIM
+GROUP BY B.CODIGO_PRODUTO, B.NOME_PRODUTO
+ORDER BY TOTAL_PLANEJADO DESC
+LIMIT 5;
+
+-- C) Consumo de MP por dia (série)
+SELECT *
+FROM VW_CONSUMO_MP_POR_DIA
+WHERE DIA BETWEEN @DATA_INI AND @DATA_FIM
+ORDER BY DIA, CODIGO_MP;
+
+-- D) Consumo de MP por tipo (pizza/barras no período)
+SELECT
+  MP.CODIGO_MP,
+  MP.NOME_MP,
+  ROUND(SUM(CMD.CONSUMO_KG),3) AS CONSUMO_KG
+FROM VW_CONSUMO_MP_POR_DIA CMD
+JOIN (SELECT DISTINCT CODIGO_MP, NOME_MP FROM VW_CONSUMO_MP) MP
+  ON MP.CODIGO_MP = CMD.CODIGO_MP
+WHERE CMD.DIA BETWEEN @DATA_INI AND @DATA_FIM
+GROUP BY MP.CODIGO_MP, MP.NOME_MP
+ORDER BY CONSUMO_KG DESC;
+
+-- =========================================================
+-- =======   PLANEJADO × CONSUMIDO (DESVIOS)   =============
+-- =========================================================
+
+-- E) Desvio por OP e MP (apto a tabela/detalhe)
+SELECT
+  V.CODIGO_OP,
+  V.CODIGO_MP,
+  V.NOME_MP,
+  V.PLANEJADO_KG,
+  V.CONSUMIDO_KG,
+  V.DESVIO_KG
+FROM VW_PLANEJADO_CONSUMIDO_OP_MP V
+JOIN ORDEM_PRODUCAO OP ON OP.ID_ORDEM_PRODUCAO = V.ID_ORDEM_PRODUCAO
+WHERE OP.DT_HORA_INICIO >= @DATA_INI
+  AND OP.DT_HORA_INICIO <  DATE_ADD(@DATA_FIM, INTERVAL 1 DAY)
+ORDER BY V.CODIGO_OP, V.CODIGO_MP;
+
+-- F) TOP desvios (absolutos) por OP (ranking)
+SELECT
+  V.CODIGO_OP,
+  ROUND(SUM(V.DESVIO_KG),3)           AS DESVIO_KG_TOTAL,
+  ROUND(ABS(SUM(V.DESVIO_KG)),3)      AS DESVIO_ABS_KG
+FROM VW_PLANEJADO_CONSUMIDO_OP_MP V
+JOIN ORDEM_PRODUCAO OP ON OP.ID_ORDEM_PRODUCAO = V.ID_ORDEM_PRODUCAO
+WHERE OP.DT_HORA_INICIO >= @DATA_INI
+  AND OP.DT_HORA_INICIO <  DATE_ADD(@DATA_FIM, INTERVAL 1 DAY)
+GROUP BY V.CODIGO_OP
+ORDER BY DESVIO_ABS_KG DESC
+LIMIT 10;
+
+-- G) Agregado por MP no período (planejado vs consumido)
+SELECT
+  MP.CODIGO_MP,
+  MP.NOME_MP,
+  ROUND(SUM(V.PLANEJADO_KG),3) AS PLANEJADO_KG,
+  ROUND(SUM(V.CONSUMIDO_KG),3) AS CONSUMIDO_KG,
+  ROUND(SUM(V.DESVIO_KG),3)    AS DESVIO_KG
+FROM (
+  -- recalcula a view restrita ao período
+  SELECT
+    MP.ID_MATERIA_PRIMA,
+    MP.CODIGO AS CODIGO_MP,
+    MP.NOME   AS NOME_MP,
+    SUM(MPO.QUANTIDADE_PREVISTA)                    AS PLANEJADO_KG,
+    COALESCE(SUM(CONS.CONSUMO_TOTAL),0)             AS CONSUMIDO_KG,
+    COALESCE(SUM(CONS.CONSUMO_TOTAL),0) - SUM(MPO.QUANTIDADE_PREVISTA) AS DESVIO_KG
+  FROM MATERIA_PRIMA_ORDEM_PRODUCAO MPO
+  JOIN ORDEM_PRODUCAO OP ON OP.ID_ORDEM_PRODUCAO = MPO.ID_ORDEM_PRODUCAO
+  JOIN MATERIA_PRIMA MP  ON MP.ID_MATERIA_PRIMA  = MPO.ID_MATERIA_PRIMA
+  LEFT JOIN (
+    SELECT
+      CLM.ID_ORDEM_PRODUCAO,
+      LM.ID_MATERIA_PRIMA,
+      SUM(CLM.QUANTIDADE_CONSUMIDA) AS CONSUMO_TOTAL
+    FROM CONSUMO_LOTE_MP CLM
+    JOIN LOTE_MP LM ON LM.ID_LOTE_MP = CLM.ID_LOTE_MP
+    GROUP BY CLM.ID_ORDEM_PRODUCAO, LM.ID_MATERIA_PRIMA
+  ) CONS ON CONS.ID_ORDEM_PRODUCAO = MPO.ID_ORDEM_PRODUCAO
+       AND CONS.ID_MATERIA_PRIMA  = MPO.ID_MATERIA_PRIMA
+  WHERE OP.DT_HORA_INICIO >= @DATA_INI
+    AND OP.DT_HORA_INICIO <  DATE_ADD(@DATA_FIM, INTERVAL 1 DAY)
+  GROUP BY MP.ID_MATERIA_PRIMA, MP.CODIGO, MP.NOME
+) V
+JOIN (SELECT DISTINCT CODIGO_MP, NOME_MP FROM VW_CONSUMO_MP) MP
+  ON MP.CODIGO_MP = V.CODIGO_MP
+GROUP BY MP.CODIGO_MP, MP.NOME_MP
+ORDER BY DESVIO_KG DESC;
+
+-- =========================================================
+-- ===============   ESTOQUES / SALDOS   ===================
+-- =========================================================
+
+-- H) Saldo por lote de MP (inventário)
+SELECT *
+FROM VW_SALDO_LOTE_MP
+ORDER BY CODIGO_MP, LOTE_MP;
+
+-- I) Saldo agregado por MP (inventário)
+SELECT *
+FROM VW_SALDO_MP
+ORDER BY CODIGO_MP;
+
+-- =========================================================
+-- =============   UTILIZAÇÃO / CAPACIDADE   ===============
+-- =========================================================
+
+-- J) Utilização por linha por dia (série)
+SELECT *
+FROM VW_UTILIZACAO_LINHA_DIA
+WHERE DIA BETWEEN @DATA_INI AND @DATA_FIM
+ORDER BY LINHA, DIA;
+
+-- K) Linhas com maior utilização média no período (Top 5)
+SELECT
+  U.LINHA,
+  ROUND(AVG(U.UTILIZACAO_REL),2) AS UTILIZACAO_MEDIA
+FROM VW_UTILIZACAO_LINHA_DIA U
+WHERE U.DIA BETWEEN @DATA_INI AND @DATA_FIM
+GROUP BY U.LINHA
+ORDER BY UTILIZACAO_MEDIA DESC
+LIMIT 5;
