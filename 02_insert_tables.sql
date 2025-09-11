@@ -14,7 +14,7 @@ INSERT INTO USUARIO (ID_USUARIO, EMAIL, NOME) VALUES
 -- =============================
 -- LINHAS DE PRODUCAO
 -- =============================
-INSERT INTO LINHA_PRODUCAO (ID_LINHA_PRODUCAO, CODIGO, NOME, CAPACIDADE_MAX, DESCRICAO, STATUS, ID_RESPONSAVEL) VALUES
+INSERT INTO LINHA_PRODUCAO (ID_LINHA_PRODUCAO, CODIGO, NOME, CAPACIDADE_HORA, DESCRICAO, STATUS, ID_RESPONSAVEL) VALUES
 (1, 'LIN-001', 'Linha Injeção de Tampas', 12000, 'Máquinas de injeção para tampas 28mm', 'ATIVA', 1),
 (2, 'LIN-002', 'Linha Sopro de Garrafas',  8000, 'Sopro de garrafas PET 500ml',          'ATIVA', 2),
 (3, 'LIN-003', 'Linha Impressão de Rótulos', 20000, 'Impressão flexográfica de rótulos BOPP', 'ATIVA', 3),
