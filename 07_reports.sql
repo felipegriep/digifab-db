@@ -1,0 +1,234 @@
+USE DIGIFAB;
+
+-- =========================================================
+-- 07_reports.sql
+-- Relatórios prontos (MySQL 8) usando o schema + views
+-- =========================================================
+
+-- ---------------------------------------------------------
+-- PARÂMETROS GERAIS DE PERÍODO
+-- Ajuste conforme necessário:
+--   Ex.: últimos 7 dias
+--     SET @DATA_INI = DATE_SUB(CURDATE(), INTERVAL 6 DAY);
+--     SET @DATA_FIM = CURDATE();
+--   Ex.: período fixo
+--     SET @DATA_INI = '2025-09-05';
+--     SET @DATA_FIM = '2025-09-10';
+-- ---------------------------------------------------------
+SET @DATA_INI = DATE_SUB(CURDATE(), INTERVAL 6 DAY);
+SET @DATA_FIM = CURDATE();
+
+-- =========================================================
+-- 1) Produção diária por linha
+-- Fonte: VW_PRODUCAO_POR_DIA_LINHA
+-- =========================================================
+-- Produção por dia × linha (para tabela/gráfico)
+SELECT DIA, CODIGO_LINHA, NOME_LINHA, QTD_PLANEJADA
+FROM VW_PRODUCAO_POR_DIA_LINHA
+WHERE DIA BETWEEN @DATA_INI AND @DATA_FIM
+ORDER BY DIA, CODIGO_LINHA;
+
+-- =========================================================
+-- 2) Top produtos no período
+-- Fonte: VW_OP_BASICA
+-- =========================================================
+SELECT
+  CODIGO_PRODUTO, NOME_PRODUTO,
+  SUM(QUANTIDADE_PRODUZIR) AS TOTAL_PLANEJADO
+FROM VW_OP_BASICA
+WHERE DIA BETWEEN @DATA_INI AND @DATA_FIM
+GROUP BY CODIGO_PRODUTO, NOME_PRODUTO
+ORDER BY TOTAL_PLANEJADO DESC
+LIMIT 10;
+
+-- =========================================================
+-- 3) Desvio Planejado × Consumido (por OP e MP)
+-- Fontes: VW_PLANEJADO_CONSUMIDO_OP_MP, ORDEM_PRODUCAO
+-- =========================================================
+SELECT
+  V.CODIGO_OP, V.CODIGO_MP, V.NOME_MP,
+  V.PLANEJADO_KG, V.CONSUMIDO_KG, V.DESVIO_KG
+FROM VW_PLANEJADO_CONSUMIDO_OP_MP V
+JOIN ORDEM_PRODUCAO OP ON OP.ID_ORDEM_PRODUCAO = V.ID_ORDEM_PRODUCAO
+WHERE OP.DT_HORA_INICIO >= @DATA_INI
+  AND OP.DT_HORA_INICIO <  DATE_ADD(@DATA_FIM, INTERVAL 1 DAY)
+ORDER BY ABS(V.DESVIO_KG) DESC, V.CODIGO_OP, V.CODIGO_MP;
+
+-- =========================================================
+-- 4) Consumo de MP por fornecedor
+-- Fontes: CONSUMO_LOTE_MP, LOTE_MP, FORNECEDOR, MATERIA_PRIMA
+-- =========================================================
+SELECT
+  F.CODIGO   AS CODIGO_FORNECEDOR,
+  F.NOME     AS NOME_FORNECEDOR,
+  MP.CODIGO  AS CODIGO_MP,
+  MP.NOME    AS NOME_MP,
+  ROUND(SUM(CLM.QUANTIDADE_CONSUMIDA),3) AS CONSUMO_KG
+FROM CONSUMO_LOTE_MP CLM
+JOIN LOTE_MP LM        ON LM.ID_LOTE_MP = CLM.ID_LOTE_MP
+JOIN FORNECEDOR F      ON F.ID_FORNECEDOR = LM.ID_FORNECEDOR
+JOIN MATERIA_PRIMA MP  ON MP.ID_MATERIA_PRIMA = LM.ID_MATERIA_PRIMA
+WHERE CLM.DATA_CONSUMO >= @DATA_INI
+  AND CLM.DATA_CONSUMO <  DATE_ADD(@DATA_FIM, INTERVAL 1 DAY)
+GROUP BY F.CODIGO, F.NOME, MP.CODIGO, MP.NOME
+ORDER BY F.NOME, MP.NOME;
+
+-- =========================================================
+-- 5) Lotes de MP a vencer (com saldo)
+-- Fontes: VW_SALDO_LOTE_MP, LOTE_MP
+-- =========================================================
+SET @DIAS_VENC := 30;  -- horizonte (dias)
+SELECT
+  L.LOTE_MP,
+  L.CODIGO_MP, L.NOME_MP,
+  L.QTD_SALDO_KG,
+  LM.DATA_VALIDADE
+FROM VW_SALDO_LOTE_MP L
+JOIN LOTE_MP LM ON LM.ID_LOTE_MP = L.ID_LOTE_MP
+WHERE LM.DATA_VALIDADE IS NOT NULL
+  AND LM.DATA_VALIDADE <= DATE_ADD(CURDATE(), INTERVAL @DIAS_VENC DAY)
+  AND L.QTD_SALDO_KG > 0
+ORDER BY LM.DATA_VALIDADE, L.CODIGO_MP, L.LOTE_MP;
+
+-- =========================================================
+-- 6) Idade média do estoque consumido (dias)
+-- Fontes: CONSUMO_LOTE_MP, LOTE_MP, MATERIA_PRIMA
+-- =========================================================
+SELECT
+  MP.CODIGO AS CODIGO_MP,
+  MP.NOME   AS NOME_MP,
+  ROUND(AVG(DATEDIFF(CLM.DATA_CONSUMO, LM.DATA_RECEBIMENTO)),1) AS IDADE_MEDIA_DIAS,
+  ROUND(SUM(CLM.QUANTIDADE_CONSUMIDA),3) AS CONSUMO_TOTAL_KG
+FROM CONSUMO_LOTE_MP CLM
+JOIN LOTE_MP LM       ON LM.ID_LOTE_MP = CLM.ID_LOTE_MP
+JOIN MATERIA_PRIMA MP ON MP.ID_MATERIA_PRIMA = LM.ID_MATERIA_PRIMA
+WHERE CLM.DATA_CONSUMO >= @DATA_INI
+  AND CLM.DATA_CONSUMO <  DATE_ADD(@DATA_FIM, INTERVAL 1 DAY)
+GROUP BY MP.CODIGO, MP.NOME
+ORDER BY IDADE_MEDIA_DIAS DESC;
+
+-- =========================================================
+-- 7) Utilização por linha (média e totais)
+-- Fonte: VW_UTILIZACAO_LINHA_DIA
+-- =========================================================
+SELECT
+  LINHA,
+  ROUND(AVG(UTILIZACAO_REL),2) AS UTILIZACAO_MEDIA,
+  SUM(PROGRAMADO_DIA)          AS PROGRAMADO_TOTAL,
+  SUM(CAPACIDADE_ESTIMADA)     AS CAPACIDADE_TOTAL
+FROM VW_UTILIZACAO_LINHA_DIA
+WHERE DIA BETWEEN @DATA_INI AND @DATA_FIM
+GROUP BY LINHA
+ORDER BY UTILIZACAO_MEDIA DESC;
+
+-- =========================================================
+-- 8) Cobertura de estoque de MP (dias)
+-- Fontes: VW_SALDO_MP, MATERIA_PRIMA_ORDEM_PRODUCAO, ORDEM_PRODUCAO
+-- =========================================================
+SET @DIAS_FUTUROS := 14;
+SET @INI := CURDATE();
+SET @FIM := DATE_ADD(CURDATE(), INTERVAL @DIAS_FUTUROS DAY);
+
+WITH PL AS (
+  SELECT
+    MP.ID_MATERIA_PRIMA,
+    SUM(MPO.QUANTIDADE_PREVISTA) / NULLIF(DATEDIFF(@FIM,@INI)+1,0) AS MEDIA_DIA_PLANEJADA
+  FROM MATERIA_PRIMA_ORDEM_PRODUCAO MPO
+  JOIN ORDEM_PRODUCAO OP ON OP.ID_ORDEM_PRODUCAO = MPO.ID_ORDEM_PRODUCAO
+  JOIN MATERIA_PRIMA MP  ON MP.ID_MATERIA_PRIMA  = MPO.ID_MATERIA_PRIMA
+  WHERE OP.DT_HORA_INICIO >= @INI
+    AND OP.DT_HORA_INICIO <  DATE_ADD(@FIM, INTERVAL 1 DAY)
+  GROUP BY MP.ID_MATERIA_PRIMA
+)
+SELECT
+  S.CODIGO_MP, S.NOME_MP,
+  S.SALDO_TOTAL_KG,
+  ROUND(PL.MEDIA_DIA_PLANEJADA,3) AS MEDIA_DIA_PLANEJADA_KG,
+  CASE
+    WHEN PL.MEDIA_DIA_PLANEJADA IS NULL OR PL.MEDIA_DIA_PLANEJADA = 0 THEN NULL
+    ELSE ROUND(S.SALDO_TOTAL_KG / PL.MEDIA_DIA_PLANEJADA,1)
+  END AS DIAS_COBERTURA
+FROM VW_SALDO_MP S
+LEFT JOIN PL ON PL.ID_MATERIA_PRIMA = (
+  SELECT ID_MATERIA_PRIMA FROM MATERIA_PRIMA WHERE CODIGO = S.CODIGO_MP LIMIT 1
+)
+ORDER BY DIAS_COBERTURA ASC;
+
+-- =========================================================
+-- 9) Produção e consumo por responsável
+-- Fontes: ORDEM_PRODUCAO, USUARIO, CONSUMO_LOTE_MP, LOTE_MP
+-- =========================================================
+-- 9a) Produção planejada por responsável
+SELECT U.NOME, U.EMAIL,
+       COUNT(*) AS QTD_OPS,
+       SUM(OP.QUANTIDADE_PRODUZIR) AS UNIDADES
+FROM ORDEM_PRODUCAO OP
+JOIN USUARIO U ON U.ID_USUARIO = OP.ID_RESPONSAVEL
+WHERE OP.DT_HORA_INICIO >= @DATA_INI
+  AND OP.DT_HORA_INICIO <  DATE_ADD(@DATA_FIM, INTERVAL 1 DAY)
+GROUP BY U.NOME, U.EMAIL
+ORDER BY UNIDADES DESC;
+
+-- 9b) Consumo registrado por responsável (quem cadastrou o lote)
+SELECT U.NOME, U.EMAIL,
+       ROUND(SUM(CLM.QUANTIDADE_CONSUMIDA),3) AS MP_CONSUMIDA_KG
+FROM CONSUMO_LOTE_MP CLM
+JOIN LOTE_MP LM  ON LM.ID_LOTE_MP = CLM.ID_LOTE_MP
+JOIN USUARIO U   ON U.ID_USUARIO = LM.ID_RESPONSAVEL
+WHERE CLM.DATA_CONSUMO >= @DATA_INI
+  AND CLM.DATA_CONSUMO <  DATE_ADD(@DATA_FIM, INTERVAL 1 DAY)
+GROUP BY U.NOME, U.EMAIL
+ORDER BY MP_CONSUMIDA_KG DESC;
+
+-- =========================================================
+-- 10) Cumprimento FEFO (proxy)
+-- Fontes: CONSUMO_LOTE_MP, LOTE_MP, MATERIA_PRIMA
+-- =========================================================
+SELECT
+  MP.CODIGO AS CODIGO_MP, MP.NOME AS NOME_MP,
+  ROUND(AVG(CASE WHEN LM.DATA_RECEBIMENTO = T.MIN_REC THEN 1 ELSE 0 END)*100,1) AS FEFO_PCT
+FROM CONSUMO_LOTE_MP CLM
+JOIN LOTE_MP LM       ON LM.ID_LOTE_MP = CLM.ID_LOTE_MP
+JOIN MATERIA_PRIMA MP ON MP.ID_MATERIA_PRIMA = LM.ID_MATERIA_PRIMA
+JOIN (
+  SELECT ID_MATERIA_PRIMA, MIN(DATA_RECEBIMENTO) AS MIN_REC
+  FROM LOTE_MP
+  GROUP BY ID_MATERIA_PRIMA
+) T ON T.ID_MATERIA_PRIMA = MP.ID_MATERIA_PRIMA
+WHERE CLM.DATA_CONSUMO BETWEEN @DATA_INI AND DATE_ADD(@DATA_FIM, INTERVAL 1 DAY)
+GROUP BY MP.CODIGO, MP.NOME
+ORDER BY FEFO_PCT DESC;
+
+-- =========================================================
+-- 11) Comparativo Período vs. Período (PVP)
+-- Fonte: VW_OP_BASICA
+-- =========================================================
+-- Períodos padrão (ajuste conforme necessário)
+SET @P1_INI = DATE_FORMAT(CURDATE(), '%Y-%m-01');
+SET @P1_FIM = LAST_DAY(CURDATE());
+SET @P2_INI = DATE_FORMAT(DATE_SUB(@P1_INI, INTERVAL 1 MONTH), '%Y-%m-01');
+SET @P2_FIM = LAST_DAY(@P2_INI);
+
+WITH P1 AS (
+  SELECT SUM(QUANTIDADE_PRODUZIR) AS QTD FROM VW_OP_BASICA
+  WHERE DIA BETWEEN @P1_INI AND @P1_FIM
+), P2 AS (
+  SELECT SUM(QUANTIDADE_PRODUZIR) AS QTD FROM VW_OP_BASICA
+  WHERE DIA BETWEEN @P2_INI AND @P2_FIM
+)
+SELECT
+  P1.QTD AS QTD_P1,
+  P2.QTD AS QTD_P2,
+  ROUND((P1.QTD - P2.QTD)/NULLIF(P2.QTD,0)*100,1) AS VAR_PCT
+FROM P1, P2;
+
+-- =========================================================
+-- 12) Mapa de rastreabilidade (export)
+-- Fonte: VW_RASTREABILIDADE_CONSUMO
+-- =========================================================
+SELECT *
+FROM VW_RASTREABILIDADE_CONSUMO
+WHERE DATA_CONSUMO BETWEEN @DATA_INI AND DATE_ADD(@DATA_FIM, INTERVAL 1 DAY)
+ORDER BY CODIGO_OP, LOTE_PRODUTO, CODIGO_MP, LOTE_MP, DATA_CONSUMO;
+
+-- ======================== FIM 07_reports.sql ========================
