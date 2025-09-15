@@ -64,6 +64,15 @@ USE DIGIFAB;
 │  OP-20250909-001 GARRAFA 500ML     LP-GAR-...   PET   LMP-PET-...  20,0  09/09 │
 │  OP-20250905-003 RÓTULO 500ML      LP-ROT-...   PP    LMP-PP-...    2,0  05/09 │
 └────────────────────────────────────────────────────────────────────────────────┘
+Como mapear cada bloco às queries/views
+	•	KPIs → blocos 1–5 do 05_queries_dashboard.sql.
+	•	Produção por dia × linha → VW_PRODUCAO_POR_DIA_LINHA (bloco A).
+	•	Top Produtos → consulta B (usa VW_OP_BASICA).
+	•	Consumo MP por dia/por tipo → C + D.
+	•	Planejado × Consumido (MP) → G (ou VW_PLANEJADO_CONSUMIDO_MP se preferir).
+	•	Utilização por linha/dia → J (série) e K (ranking).
+	•	Rastreabilidade → VW_RASTREABILIDADE_CONSUMO.
+
 */
 
 
