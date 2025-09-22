@@ -91,7 +91,7 @@ Como mapear cada bloco às queries/views
 --      SET @DATA_INI = '2025-09-05';
 --      SET @DATA_FIM = '2025-09-10';
 -- -------------------------
-SET @DATA_INI = DATE_SUB(CURDATE(), INTERVAL 6 DAY);
+SET @DATA_INI = DATE_SUB(CURDATE(), INTERVAL 15 DAY);
 SET @DATA_FIM = CURDATE();
 
 -- =========================================================
